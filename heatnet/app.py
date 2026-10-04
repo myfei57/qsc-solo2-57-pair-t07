@@ -18,6 +18,7 @@ from .config import PlatformConfig, default_config
 from .errors import PlantError
 from .eventbus import Event, EventBus
 from .ids import IdFactory
+from .leak.service import LeakService
 from .ns.registry import NamespaceRegistry
 from .ns.topology import Topology, build_default_topology
 from .ns.zone import Zone, ZoneRegistry
@@ -111,6 +112,9 @@ class Platform:
         self._build_meters()
         self.pressure = PressurisingController(
             PressureBaseline(self.config.pressure), self.config.pressure
+        )
+        self.leak = LeakService(
+            self.config.leak, self.zones, self.pressure.baseline, self.secondary, self.clock
         )
 
         self._cycles = 0
@@ -426,6 +430,8 @@ class Platform:
 
         with self._lock:
             report = self.pressure.retrofit(self.secondary, target_kpa)
+            if report["ok"]:
+                report["leak_plan"] = self.leak.refresh_plan()
             self.bus.publish(
                 Event.of(
                     "pressure",
@@ -437,6 +443,46 @@ class Platform:
                 )
             )
             return report
+
+    # ---- 漏点定位 -----------------------------------------------------
+
+    def assess_leaks(self, observations: list[dict], window_s: float = 300.0) -> dict:
+        """按各分区压降速度与补水增量评估漏点嫌疑，给出排名与隔离建议。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            report = self.leak.assess(observations, window_s)
+            summary = self._record_operation(op_id, "leak_assess", report)
+            self._operations += 1
+            self._persist()
+            return {**report, **summary}
+
+    def isolate_zone(self, zone: str) -> dict:
+        """隔离一个嫌疑分区，并重算其余在役分区的定压。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            report = self.leak.isolate(zone)
+            summary = self._record_operation(op_id, "zone_isolate", report)
+            self._operations += 1
+            self._persist()
+            return {**report, **summary}
+
+    def recover_zone(self, zone: str) -> dict:
+        """恢复一个已隔离分区：先补水充压、再并网、最后重算定压。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            report = self.leak.recover(zone)
+            summary = self._record_operation(op_id, "zone_recover", report)
+            self._operations += 1
+            self._persist()
+            return {**report, **summary}
+
+    def leak_report(self) -> dict:
+        """漏点定位当前状态：最近评估、嫌疑排序、隔离台账与定压计划。"""
+
+        return self.leak.report()
 
     def secondary_cycle(self, dt: float = 1.0) -> dict:
         """跑一个二次网循环（结束前泵一定停稳）。"""

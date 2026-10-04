@@ -48,6 +48,7 @@ class Api:
         add("GET", "/api/curve", self._curve)
         add("GET", "/api/forecast", self._forecast)
         add("GET", "/api/pressure", self._pressure)
+        add("GET", "/api/leaks", self._leaks)
         add("GET", "/api/quota", self._quota)
         add("GET", "/api/billing", self._billing)
         add("GET", "/api/trend", self._trend)
@@ -66,6 +67,9 @@ class Api:
         add("POST", "/api/cycle", self._cycle)
         add("POST", "/api/calibrate", self._calibrate)
         add("POST", "/api/retrofit", self._retrofit)
+        add("POST", "/api/leak/assess", self._leak_assess)
+        add("POST", "/api/zone/isolate", self._zone_isolate)
+        add("POST", "/api/zone/recover", self._zone_recover)
         add("POST", "/api/secondary/cycle", self._secondary_cycle)
         add("POST", "/api/meter", self._meter)
         add("POST", "/api/settle", self._settle)
@@ -171,6 +175,9 @@ class Api:
 
     def _pressure(self, params: dict, body: dict) -> dict:
         return self._platform.pressure_report()
+
+    def _leaks(self, params: dict, body: dict) -> dict:
+        return self._platform.leak_report()
 
     def _quota(self, params: dict, body: dict) -> dict:
         return self._platform.quota_report()
@@ -293,6 +300,19 @@ class Api:
     def _retrofit(self, params: dict, body: dict) -> dict:
         target = _as_float(body, "baseline_kpa", self._platform.pressure.baseline.value_kpa())
         return self._platform.retrofit_baseline(target)
+
+    def _leak_assess(self, params: dict, body: dict) -> dict:
+        observations = body.get("observations") or []
+        return self._platform.assess_leaks(
+            [dict(item) for item in observations],
+            _as_float(body, "window_s", 300.0),
+        )
+
+    def _zone_isolate(self, params: dict, body: dict) -> dict:
+        return self._platform.isolate_zone(str(body.get("zone", "")))
+
+    def _zone_recover(self, params: dict, body: dict) -> dict:
+        return self._platform.recover_zone(str(body.get("zone", "")))
 
     def _secondary_cycle(self, params: dict, body: dict) -> dict:
         return self._platform.secondary_cycle(_as_float(body, "dt", 1.0))

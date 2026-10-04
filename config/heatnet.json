@@ -56,6 +56,12 @@
       "meter_wrap_mwh": 100000.0,
       "sample_period_s": 30.0,
       "period_hours": 24.0
+    },
+    "leak": {
+      "suspect_rate_kpa_s": 0.05,
+      "clear_margin_ratio": 1.5,
+      "max_isolate_station_share": 0.5,
+      "min_remaining_zones": 1
     }
   }
 }

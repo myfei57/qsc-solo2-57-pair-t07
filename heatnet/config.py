@@ -2,8 +2,9 @@
 
 配置来自 JSON 文件（标准库解析），覆盖热源供温带与调质确认时间、供热曲线的
 室外温度区间与过期时间、换热站混水阀行程与批量确认时间、一次网流量基线与
-调度速率、二次网补水定压带、阀门行程公差、循环泵升速斜率、定压基线范围与
-热量表回绕阈值，以及状态存储目录。任何缺失或越界取值都在装配阶段抛出
+调度速率、二次网补水定压带、阀门行程公差、循环泵升速斜率、定压基线范围、
+热量表回绕阈值、漏点定位的嫌疑门限与隔离拓扑约束，以及状态存储目录。任何
+缺失或越界取值都在装配阶段抛出
 :class:`ConfigError`，不允许带着半份配置启动控制链。
 """
 
@@ -260,6 +261,33 @@ class PressureLimits:
 
 
 @dataclass(frozen=True)
+class LeakLimits:
+    """漏点定位的嫌疑门限、明确度余量与隔离拓扑约束。"""
+
+    suspect_rate_kpa_s: float
+    clear_margin_ratio: float
+    max_isolate_station_share: float
+    min_remaining_zones: int
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "LeakLimits":
+        limits = cls(
+            suspect_rate_kpa_s=_number(section, "suspect_rate_kpa_s", minimum=0.001),
+            clear_margin_ratio=_number(section, "clear_margin_ratio", minimum=1.0),
+            max_isolate_station_share=_number(section, "max_isolate_station_share", minimum=0.01),
+            min_remaining_zones=int(_number(section, "min_remaining_zones", minimum=1.0)),
+        )
+        if limits.max_isolate_station_share > 1.0:
+            raise ConfigError("可隔离站数占比不得大于 1", component="config")
+        return limits
+
+    def suspect(self, drop_rate_kpa_s: float) -> bool:
+        """压降速度是否越过嫌疑门限。"""
+
+        return float(drop_rate_kpa_s) > self.suspect_rate_kpa_s
+
+
+@dataclass(frozen=True)
 class QuotaLimits:
     """热量表回绕阈值与结算周期。"""
 
@@ -291,6 +319,7 @@ class PlatformConfig:
     pump: PumpLimits
     pressure: PressureLimits
     quota: QuotaLimits
+    leak: LeakLimits
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "PlatformConfig":
@@ -315,6 +344,7 @@ class PlatformConfig:
             pump=PumpLimits.from_mapping(_section(limits, "pump")),
             pressure=PressureLimits.from_mapping(_section(limits, "pressure")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            leak=LeakLimits.from_mapping(_section(limits, "leak")),
         )
 
 
@@ -345,6 +375,7 @@ def default_config() -> PlatformConfig:
         pump=PumpLimits(40.0, 20.0, 100.0),
         pressure=PressureLimits(240.0, 430.0, 6.0),
         quota=QuotaLimits(100000.0, 30.0, 24.0),
+        leak=LeakLimits(0.05, 1.5, 0.5, 1),
     )
 
 
@@ -406,6 +437,12 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "meter_wrap_mwh": cfg.quota.meter_wrap_mwh,
                 "sample_period_s": cfg.quota.sample_period_s,
                 "period_hours": cfg.quota.period_hours,
+            },
+            "leak": {
+                "suspect_rate_kpa_s": cfg.leak.suspect_rate_kpa_s,
+                "clear_margin_ratio": cfg.leak.clear_margin_ratio,
+                "max_isolate_station_share": cfg.leak.max_isolate_station_share,
+                "min_remaining_zones": cfg.leak.min_remaining_zones,
             },
         },
     }
