@@ -24,6 +24,7 @@ packages = [
     "heatnet.pump",
     "heatnet.temp",
     "heatnet.pressure",
+    "heatnet.leak",
     "heatnet.quota",
     "heatnet.sequence",
     "heatnet.console",

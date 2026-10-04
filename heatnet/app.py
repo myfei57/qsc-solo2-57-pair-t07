@@ -18,6 +18,9 @@ from .config import PlatformConfig, default_config
 from .errors import PlantError
 from .eventbus import Event, EventBus
 from .ids import IdFactory
+from .leak.analysis import LeakObservation
+from .leak.monitor import LeakMonitor
+from .leak.topology import build_default_leak_topology
 from .ns.registry import NamespaceRegistry
 from .ns.topology import Topology, build_default_topology
 from .ns.zone import Zone, ZoneRegistry
@@ -111,6 +114,10 @@ class Platform:
         self._build_meters()
         self.pressure = PressurisingController(
             PressureBaseline(self.config.pressure), self.config.pressure
+        )
+        self.leaks = LeakMonitor(
+            build_default_leak_topology(self.zones.names(), self.config.secondary.makeup_target_kpa),
+            self.config.secondary.makeup_target_kpa,
         )
 
         self._cycles = 0
@@ -438,6 +445,101 @@ class Platform:
             )
             return report
 
+    def _apply_leak_setpoint(self, target_kpa: float) -> float:
+        """漏点隔离/恢复共用的定压应用口径。"""
+
+        return self.pressure.retrofit(self.secondary, target_kpa)["baseline_kpa"]
+
+    def leak_report(self) -> dict:
+        """返回嫌疑分区、隔离状态与最近诊断。"""
+
+        with self._lock:
+            return self.leaks.report()
+
+    def analyse_leaks(self, observations: list[dict], *, force: bool = False) -> dict:
+        """按压降速度定位漏点；补水量只作佐证。"""
+
+        with self._lock:
+            parsed = [
+                LeakObservation.from_mapping(str(item.get("zone", "")), item)
+                for item in observations
+            ]
+            if any(not item.zone for item in parsed):
+                raise PlantError("漏点观测必须包含 zone", component="leak")
+            decision = self.leaks.analyse(parsed, force=force)
+            payload = decision.as_dict()
+            warning = bool(payload["missing_pressure_zones"])
+            self.bus.publish(
+                Event.of(
+                    "leak",
+                    "leak",
+                    "leak_analysis",
+                    severity="warning" if warning else "notice",
+                    message="二次网漏点嫌疑诊断（压降缺失按可疑处理）"
+                    if warning
+                    else "二次网漏点嫌疑诊断",
+                    metric=payload["metric"],
+                    candidate_zone=payload["candidate_zone"],
+                    recommended_action=payload["action"],
+                    missing_pressure_zones=payload["missing_pressure_zones"],
+                    suspects=payload["suspects"],
+                )
+            )
+            return payload
+
+    def isolate_leak_candidate(
+        self, zone: str | None = None, *, force: bool = False, margin_kpa: float = 0.0
+    ) -> dict:
+        """按最新诊断和固定时序隔离候选分区，并重算其余区定压。"""
+
+        with self._lock:
+            decision = self.leaks.last_decision()
+            if decision is None:
+                raise PlantError("尚未形成漏点诊断，不能隔离", component="leak")
+            report = self.leaks.isolation.isolate(
+                decision,
+                apply_setpoint=self._apply_leak_setpoint,
+                validate_setpoint=self.pressure.baseline.in_range,
+                force=force,
+                margin_kpa=margin_kpa,
+                zone=zone,
+            )
+            ok = bool(report.get("ok", True))
+            self.bus.publish(
+                Event.of(
+                    "leak",
+                    "leak",
+                    "leak_isolation",
+                    severity="notice" if ok else "warning",
+                    message="漏点候选分区隔离" if ok else "漏点候选分区隔离后定压重算失败",
+                    **report,
+                )
+            )
+            return report
+
+    def restore_leak_zone(self, zone: str, *, margin_kpa: float = 0.0) -> dict:
+        """按隔离的逆序恢复分区，并先重算在线定压。"""
+
+        with self._lock:
+            report = self.leaks.isolation.restore(
+                zone,
+                apply_setpoint=self._apply_leak_setpoint,
+                validate_setpoint=self.pressure.baseline.in_range,
+                margin_kpa=margin_kpa,
+            )
+            ok = bool(report.get("ok", True))
+            self.bus.publish(
+                Event.of(
+                    "leak",
+                    "leak",
+                    "leak_restoration",
+                    severity="notice" if ok else "warning",
+                    message="漏点隔离分区恢复" if ok else "漏点隔离分区恢复定压失败",
+                    **report,
+                )
+            )
+            return report
+
     def secondary_cycle(self, dt: float = 1.0) -> dict:
         """跑一个二次网循环（结束前泵一定停稳）。"""
 
@@ -500,6 +602,7 @@ class Platform:
 
         with self._lock:
             child = self.zones.split(source_zone, stations, new_zone)
+            self.leaks.sync_zone(child.name, self.config.secondary.makeup_target_kpa)
             count = self.mapping.rebuild()
             for name in child.stations:
                 if name in self.stations:
@@ -811,6 +914,7 @@ class Platform:
                 },
             },
             "zones": self.zones.describe(),
+            "leaks": self.leak_report(),
             "mapping": self.mapping.describe(),
             "quota": self.quota_report(),
             "store": self.metrics.summary(),
@@ -826,6 +930,7 @@ class Platform:
             "topology": self.topology.summary(),
             "namespaces": self.namespaces.describe(),
             "zones": self.zones.describe(),
+            "leaks": self.leak_report(),
             "mapping": self.mapping.describe(),
             "trend": self.trend.snapshot(),
             "alarms_recent": self.audit.alarms()[-10:],

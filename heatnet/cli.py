@@ -30,6 +30,7 @@ DEFAULT_PROBE_PATHS = (
     "/api/topology",
     "/api/audit",
     "/api/stations",
+    "/api/leaks",
     "/api/quota",
 )
 

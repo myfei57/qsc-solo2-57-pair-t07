@@ -48,6 +48,10 @@ class Api:
         add("GET", "/api/curve", self._curve)
         add("GET", "/api/forecast", self._forecast)
         add("GET", "/api/pressure", self._pressure)
+        add("GET", "/api/leaks", self._leaks)
+        add("POST", "/api/leaks/analyse", self._leak_analysis)
+        add("POST", "/api/leaks/isolate", self._leak_isolate)
+        add("POST", "/api/leaks/restore", self._leak_restore)
         add("GET", "/api/quota", self._quota)
         add("GET", "/api/billing", self._billing)
         add("GET", "/api/trend", self._trend)
@@ -172,6 +176,9 @@ class Api:
     def _pressure(self, params: dict, body: dict) -> dict:
         return self._platform.pressure_report()
 
+    def _leaks(self, params: dict, body: dict) -> dict:
+        return self._platform.leak_report()
+
     def _quota(self, params: dict, body: dict) -> dict:
         return self._platform.quota_report()
 
@@ -293,6 +300,27 @@ class Api:
     def _retrofit(self, params: dict, body: dict) -> dict:
         target = _as_float(body, "baseline_kpa", self._platform.pressure.baseline.value_kpa())
         return self._platform.retrofit_baseline(target)
+
+    def _leak_analysis(self, params: dict, body: dict) -> dict:
+        observations = body.get("observations")
+        if not isinstance(observations, list):
+            raise PlantError("observations 必须是数组", component="leak")
+        return self._platform.analyse_leaks(
+            observations, force=bool(body.get("force", False))
+        )
+
+    def _leak_isolate(self, params: dict, body: dict) -> dict:
+        zone = body.get("zone")
+        return self._platform.isolate_leak_candidate(
+            None if zone is None else str(zone),
+            force=bool(body.get("force", False)),
+            margin_kpa=_as_float(body, "margin_kpa", 0.0),
+        )
+
+    def _leak_restore(self, params: dict, body: dict) -> dict:
+        return self._platform.restore_leak_zone(
+            str(body.get("zone", "")), margin_kpa=_as_float(body, "margin_kpa", 0.0)
+        )
 
     def _secondary_cycle(self, params: dict, body: dict) -> dict:
         return self._platform.secondary_cycle(_as_float(body, "dt", 1.0))
